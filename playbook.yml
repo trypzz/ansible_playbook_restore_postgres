@@ -1,0 +1,139 @@
+---
+- hosts: all
+  vars:
+    workspace: "{{ lookup('env','WORKSPACE') }}"
+  tasks:
+
+    - name: Get latest dir with backup
+      command: "ls -Art /opt/save/postgres/daily/ | tail -n 1 "
+      register: last_dir
+
+
+    # Отключаем IPv6:
+    - name: disable IPv6
+      blockinfile:
+        path: /etc/sysctl.d/disableipv6.conf
+        create: yes
+        marker: no
+        block: |
+          net.ipv6.conf.all.disable_ipv6 = 1
+          net.ipv6.conf.default.disable_ipv6 = 1
+
+
+    # Отключаем SELinux:
+    - name: disable SELinux
+      selinux:
+        state: disabled
+
+    - name: Who im i????
+      ansible.builtin.debug:
+        msg: User --- > {{ ansible_user }}
+
+
+    - name: install postgresql repo
+      yum:
+        name: "{{ item }}"
+      with_items:
+        - https://download.postgresql.org/pub/repos/yum/reporpms/EL-7-x86_64/pgdg-redhat-repo-latest.noarch.rpm
+
+    - name: install postgresql server
+      yum:
+        name: "{{ item }}"
+      with_items:
+        - postgresql10-server
+
+
+    - name: init database
+      shell: "/usr/pgsql-10/bin/postgresql-10-setup initdb"
+
+
+    - name: Stoping service
+      service:
+        name: postgresql-10
+        state: stopped
+
+#    - name: change owner
+#      file:
+#        path: "/opt/save/postgres/daily/{{last_dir.stdout}}/"
+#        recurse: yes
+#        group: jenkins
+#        owner: jenkins
+#      become: yes
+#      delegate_to: localhost
+#      connection: local
+
+    - name: create tmp dirs
+      file:
+         state: directory
+         path: /tmp/{{ item }}
+         owner: postgres
+         group: postgres
+      with_items:
+        - pg_wal
+        - pg_base
+
+    - name: Copy
+      unarchive:
+        src: "/opt/save/postgres/daily/{{last_dir.stdout}}/db.tar.gz"
+        dest: "/tmp/pg_base"
+        owner: postgres
+        group: postgres
+      become: yes
+
+
+    - name: Copy
+      unarchive:
+        src: "/opt/save/postgres/daily/{{last_dir.stdout}}/pg_wal.tar.gz"
+        dest: "/tmp/pg_wal"
+        owner: postgres
+        group: postgres
+      become: yes
+
+    - name: remove default config
+      file:
+        state: absent
+        path: /var/lib/pgsql/10/data
+
+    - name: create main dir
+      file:
+         state: directory
+         path: /var/lib/pgsql/10/data
+         owner: postgres
+         group: postgres
+
+    - name: copy backup to database maindir
+      copy:
+        remote_src: yes
+        src: /tmp/pg_base/
+     dest: /var/lib/pgsql/10/data/
+        force: yes
+        owner: postgres
+        group: postgres
+        directory_mode: yes
+        mode: 0700
+        "cp -R /tmp/pg_base/* /var/lib/pgsql/10/data/"
+
+    - name: create recovery.conf
+      file:
+         state: touch
+         path: /var/lib/pgsql/10/data/recovery.conf
+         owner: postgres
+         group: postgres
+
+    - name: Replace a localhost entry with our own
+      lineinfile:
+        path: /var/lib/pgsql/10/data/recovery.conf
+        line: restore_command = 'cp /tmp/pg_wal/%f "%p" '
+
+    - name: Enabling service postgres
+      service:
+        name: postgresql-10
+        enabled: yes
+
+    - name: Starting service postgres
+      service:
+        name: postgresql-10
+        state: restarted
+
+
+
